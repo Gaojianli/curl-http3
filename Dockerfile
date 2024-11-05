@@ -1,50 +1,30 @@
-FROM debian:12 AS builder
+FROM alpine:edge AS builder
 
 LABEL maintainer="Yury Muski <muski.yury@gmail.com>"
 
 WORKDIR /opt
 
-ARG CURL_VERSION=curl-8_2_1
-ARG QUICHE_VERSION=0.18.0
-
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y build-essential git autoconf libtool cmake golang-go curl libnghttp2-dev zlib1g-dev;
-
-# https://github.com/curl/curl/blob/master/docs/HTTP3.md#quiche-version
-
-# install rust & cargo
-RUN curl https://sh.rustup.rs -sSf | sh -s -- -y -q;
+RUN apk add --no-cache build-base git autoconf git libpsl-dev libtool cmake go curl nghttp2-dev zlib-dev automake rustup && rustup-init -y -q
 
 RUN git clone --recursive https://github.com/cloudflare/quiche
 
 # build quiche
-RUN export PATH="$HOME/.cargo/bin:$PATH" && \
-    cd quiche && \
-    git checkout $QUICHE_VERSION && \
-    cargo build --package quiche --release --features ffi,pkg-config-meta,qlog && \
+RUN cd quiche && git checkout $(curl -s https://api.github.com/repos/cloudflare/quiche/releases/latest|jq .tag_name|tr -d \" \ ) && \
+    PATH="$HOME/.cargo/bin:$PATH" cargo build --package quiche --release --features ffi,pkg-config-meta,qlog && \
     mkdir quiche/deps/boringssl/src/lib && \
     ln -vnf $(find target/release -name libcrypto.a -o -name libssl.a) quiche/deps/boringssl/src/lib/
 
-
 # add curl
-RUN git clone https://github.com/curl/curl
-RUN cd curl && \
-    git checkout $CURL_VERSION && \
+RUN git clone https://github.com/curl/curl && cd curl && \
+    git checkout $(curl -s https://api.github.com/repos/curl/curl/releases/latest|jq .tag_name|tr -d \" \  ) && \
     autoreconf -fi && \
     ./configure LDFLAGS="-Wl,-rpath,/opt/quiche/target/release" --with-openssl=/opt/quiche/quiche/deps/boringssl/src --with-quiche=/opt/quiche/target/release --with-nghttp2 --with-zlib && \
-    make && \
-    make DESTDIR="/debian/" install
+    make -j $(nproc) && \
+    make DESTDIR="/curl/" install
 
-
-FROM debian:12-slim
-RUN apt-get update && apt-get install -y ca-certificates nghttp2 zlib1g && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /debian/usr/local/ /usr/local/
-COPY --from=builder /opt/quiche/target/release /opt/quiche/target/release
-
-# Resolve any issues of C-level lib
-# location caches ("shared library cache")
-RUN ldconfig
+FROM alpine:edge
+RUN apk add --no-cache nghttp2 zlib libpsl bash perl
+COPY --from=builder /curl/usr/local/ /usr/local/
 
 WORKDIR /opt
 # add httpstat script
